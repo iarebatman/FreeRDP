@@ -140,7 +140,7 @@ if(UNIX)
 	winpr_library_add_private(m)
 endif()
 
-if((FREEBSD) AND (NOT KFREEBSD))
+if((FREEBSD OR OPENSBSD) AND (NOT KFREEBSD))
 	winpr_library_add_private(execinfo)
 endif()
 

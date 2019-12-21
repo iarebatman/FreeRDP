@@ -30,6 +30,7 @@
 
 #ifdef WITH_OPENSSL
 
+#include <openssl/opensslv.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
