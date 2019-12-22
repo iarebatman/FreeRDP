@@ -64,6 +64,7 @@
 #cmakedefine WITH_OPENH264_LOADING
 #cmakedefine WITH_FFMPEG
 #cmakedefine WITH_KQUEUE
+#cmakedefine WITH_SNDIO
 #cmakedefine WITH_DSP_EXPERIMENTAL
 #cmakedefine WITH_DSP_FFMPEG
 #cmakedefine WITH_X264
