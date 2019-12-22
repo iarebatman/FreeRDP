@@ -87,6 +87,12 @@ typedef struct winpr_event WINPR_EVENT;
 #include <dispatch/dispatch.h>
 #endif
 
+#ifdef WITH_KQUEUE
+#include <sys/types.h>
+#include <sys/event.h>
+#include <sys/time.h>
+#endif
+
 struct winpr_timer
 {
 	WINPR_HANDLE_DEF();
@@ -98,10 +104,16 @@ struct winpr_timer
 	PTIMERAPCROUTINE pfnCompletionRoutine;
 	LPVOID lpArgToCompletionRoutine;
 
-#ifdef WITH_POSIX_TIMER
-	timer_t tid;
+#if defined(WITH_POSIX_TIMER) || defined(WITH_KQUEUE)
 	struct itimerspec timeout;
 #endif
+
+#ifdef WITH_POSIX_TIMER
+	timer_t tid;
+#elif defined(WITH_KQUEUE)
+  struct kevent event;
+#endif
+
 #if defined(__APPLE__)
 	dispatch_queue_t queue;
 	dispatch_source_t source;

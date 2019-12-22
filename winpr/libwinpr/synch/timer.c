@@ -130,6 +130,13 @@ BOOL TimerCloseHandle(HANDLE handle)
 	{
 #ifdef WITH_POSIX_TIMER
 		timer_delete(timer->tid);
+#elif defined(WITH_KQUEUE)
+    if(timer->fd != -1)
+    {
+      close(timer->fd);
+    }
+    /* EV_SET(&timer->event, 1, EVFILT_TIMER, EV_DELETE, 0, 0, NULL); */
+    /* kevent(timer->fd, NULL, 0, &timer->event, 1, NULL); */
 #endif
 	}
 
@@ -149,7 +156,7 @@ BOOL TimerCloseHandle(HANDLE handle)
 	return TRUE;
 }
 
-#ifdef WITH_POSIX_TIMER
+#if defined(WITH_POSIX_TIMER) || defined(WITH_KQUEUE)
 
 static BOOL g_WaitableTimerSignalHandlerInstalled = FALSE;
 
@@ -170,10 +177,15 @@ static void WaitableTimerHandler(void* arg)
 			timer->timeout.it_interval.tv_nsec =
 			    ((timer->lPeriod % 1000) * 1000000); /* nanoseconds */
 
+#ifdef WITH_POSIX_TIMER
 			if ((timer_settime(timer->tid, 0, &(timer->timeout), NULL)) != 0)
 			{
 				WLog_ERR(TAG, "timer_settime");
 			}
+#elif defined(WITH_KQUEUE)
+      EV_SET(&timer->event, 1, EVFILT_TIMER, EV_ADD | EV_ONESHOT, 0, timer->lPeriod, timer);
+      kevent(timer->fd, NULL, 0, &timer->event, 1, NULL);
+#endif
 		}
 	}
 }
@@ -244,6 +256,7 @@ static int InitializeWaitableTimer(WINPR_TIMER* timer)
 			return -1;
 
 #elif defined(__APPLE__)
+#elif defined(WITH_KQUEUE)
 #else
 		WLog_ERR(TAG, "%s: os specific implementation is missing", __FUNCTION__);
 		result = -1;
@@ -258,12 +271,14 @@ static int InitializeWaitableTimer(WINPR_TIMER* timer)
 		sigev.sigev_notify = SIGEV_SIGNAL;
 		sigev.sigev_signo = SIGALRM;
 		sigev.sigev_value.sival_ptr = (void*)timer;
-
 		if ((timer_create(CLOCK_MONOTONIC, &sigev, &(timer->tid))) != 0)
 		{
 			WLog_ERR(TAG, "timer_create");
 			return -1;
 		}
+#elif defined(WITH_KQUEUE)
+    EV_SET(&timer->event, 1, EVFILT_TIMER, EV_ADD | EV_ONESHOT, 0, timer->lPeriod, timer);
+    kevent(timer->fd, NULL, 0, &timer->event, 1, NULL);
 
 #elif defined(__APPLE__)
 #else
@@ -313,10 +328,19 @@ HANDLE CreateWaitableTimerA(LPSECURITY_ATTRIBUTES lpTimerAttributes, BOOL bManua
 		timer->lpArgToCompletionRoutine = NULL;
 		timer->bInit = FALSE;
 
+
 		if (lpTimerName)
 			timer->name = strdup(lpTimerName);
 
 		timer->ops = &ops;
+#ifdef WITH_KQUEUE
+    timer->fd = kqueue();
+    if(timer->fd < 0)
+    {
+      WLog_ERR(TAG, "kqueue() returned error: %d", timer->fd);
+      return NULL;
+    }
+#endif
 #if defined(__APPLE__)
 
 		if (pipe(timer->pipe) != 0)
@@ -401,7 +425,7 @@ BOOL SetWaitableTimer(HANDLE hTimer, const LARGE_INTEGER* lpDueTime, LONG lPerio
 	ULONG Type;
 	WINPR_HANDLE* Object;
 	WINPR_TIMER* timer;
-#if defined(WITH_POSIX_TIMER) || defined(__APPLE__)
+#if defined(WITH_POSIX_TIMER) || defined(__APPLE__) || defined(WITH_KQUEUE)
 	LONGLONG seconds = 0;
 	LONGLONG nanoseconds = 0;
 #ifdef HAVE_SYS_TIMERFD_H
@@ -438,7 +462,7 @@ BOOL SetWaitableTimer(HANDLE hTimer, const LARGE_INTEGER* lpDueTime, LONG lPerio
 			return FALSE;
 	}
 
-#ifdef WITH_POSIX_TIMER
+#if defined(WITH_POSIX_TIMER) || defined(WITH_KQUEUE)
 	ZeroMemory(&(timer->timeout), sizeof(struct itimerspec));
 
 	if (lpDueTime->QuadPart < 0)
@@ -490,11 +514,16 @@ BOOL SetWaitableTimer(HANDLE hTimer, const LARGE_INTEGER* lpDueTime, LONG lPerio
 	}
 	else
 	{
+#ifdef WITH_POSIX_TIMER
 		if ((timer_settime(timer->tid, 0, &(timer->timeout), NULL)) != 0)
 		{
 			WLog_ERR(TAG, "timer_settime");
 			return FALSE;
 		}
+#elif defined(WITH_KQUEUE)
+    EV_SET(&timer->event, 1, EVFILT_TIMER, EV_ADD | EV_ONESHOT, 0, timer->lPeriod, timer);
+    kevent(timer->fd, NULL, 0, &timer->event, 1, NULL);
+#endif
 	}
 
 #elif defined(__APPLE__)
