@@ -111,6 +111,7 @@ struct winpr_timer
 #ifdef WITH_POSIX_TIMER
 	timer_t tid;
 #elif defined(WITH_KQUEUE)
+  pthread_t kqueue_monitoring_thread;
   struct kevent event;
 #endif
 

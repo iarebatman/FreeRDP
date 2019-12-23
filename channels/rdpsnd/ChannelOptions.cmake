@@ -3,6 +3,11 @@ set(OPTION_DEFAULT OFF)
 set(OPTION_CLIENT_DEFAULT ON)
 set(OPTION_SERVER_DEFAULT ON)
 
+if(OPENBSD)
+	set(OPTION_CLIENT_DEFAULT OFF)
+  set(OPTION_SERVER_DEFAULT OFF)
+endif()
+
 define_channel_options(NAME "rdpsnd" TYPE "static"
 	DESCRIPTION "Audio Output Virtual Channel Extension"
 	SPECIFICATIONS "[MS-RDPEA]"

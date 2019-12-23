@@ -66,7 +66,11 @@ static inline char* error_string(char* errbuf, size_t errbuf_size, int errnum)
 #endif
 
 #ifdef WITH_VAAPI
+#ifdef __OpenBSD__
+#define VAAPI_DEVICE "/dev/drmR128"
+#else
 #define VAAPI_DEVICE "/dev/dri/renderD128"
+#endif
 #endif
 
 struct _H264_CONTEXT_LIBAVCODEC

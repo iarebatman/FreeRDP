@@ -183,6 +183,37 @@ static void ts_add_ms(struct timespec* ts, DWORD dwMilliseconds)
 	ts->tv_sec += ts->tv_nsec / 1000000000L;
 	ts->tv_nsec = ts->tv_nsec % 1000000000L;
 }
+#ifdef WITH_KQUEUE
+static int waitOnkqueue(int fd, ULONG mode, DWORD dwMilliseconds)
+{
+  int res;
+  struct kevent ev;
+  if(dwMilliseconds == INFINITE)
+  {
+    WLog_VRB(TAG, "%s waiting forever for trigger", __FUNCTION__);
+    res = kevent(fd, NULL, 0, &ev, 1, NULL);
+  }
+  else
+  {
+    WLog_VRB(TAG, "%s waiting %ds for trigger", __FUNCTION__, dwMilliseconds);
+    struct timespec timeout;
+    if(dwMilliseconds == 0)
+    {
+      timeout.tv_sec = 0;
+      timeout.tv_nsec = 0;
+    } else
+    {
+      LONGLONG seconds = (dwMilliseconds/ 10000000);
+      LONGLONG nanoseconds = ((dwMilliseconds % 10000000) * 100);
+      timeout.tv_sec = seconds;
+      timeout.tv_nsec = nanoseconds;
+    }
+    res = kevent(fd, NULL, 0, &ev, 1, &timeout);
+  }
+  WLog_VRB(TAG, "%s kevent returned %d, data=%d", __FUNCTION__, res, ev.data);
+  return res;
+}
+#endif
 
 static int waitOnFd(int fd, ULONG mode, DWORD dwMilliseconds)
 {
@@ -246,6 +277,7 @@ DWORD WaitForSingleObject(HANDLE hHandle, DWORD dwMilliseconds)
 
 	if (Type == HANDLE_TYPE_PROCESS)
 	{
+		WLog_VRB(TAG, "%s: Handle is PROCESS", __FUNCTION__);
 		WINPR_PROCESS* process;
 		process = (WINPR_PROCESS*)Object;
 
@@ -261,6 +293,7 @@ DWORD WaitForSingleObject(HANDLE hHandle, DWORD dwMilliseconds)
 	}
 	else if (Type == HANDLE_TYPE_MUTEX)
 	{
+		WLog_VRB(TAG, "%s: Handle is MUTEX", __FUNCTION__);
 		WINPR_MUTEX* mutex;
 		mutex = (WINPR_MUTEX*)Object;
 
@@ -282,10 +315,46 @@ DWORD WaitForSingleObject(HANDLE hHandle, DWORD dwMilliseconds)
 
 		return WAIT_OBJECT_0;
 	}
-	else
-	{
+  #ifdef WITH_KQUEUE
+	else if (Type == HANDLE_TYPE_TIMER)
+  {
+		WLog_VRB(TAG, "%s: Handle is TIMER", __FUNCTION__);
+		WLog_VRB(TAG, "%s: Invoking Handle_getFd", __FUNCTION__);
 		int status;
 		int fd = winpr_Handle_getFd(Object);
+		WLog_VRB(TAG, "%s: fd=%d", __FUNCTION__, fd);
+
+		if (fd < 0)
+      {
+        WLog_ERR(TAG, "winpr_Handle_getFd did not return a fd!");
+        SetLastError(ERROR_INVALID_HANDLE);
+        return WAIT_FAILED;
+      }
+
+		status = waitOnkqueue(fd, Object->Mode, dwMilliseconds);
+    WLog_VRB(TAG, "waitOnkqueue() returned %d", status);
+
+		if (status < 0)
+      {
+        WLog_ERR(TAG, "waitOnkqueue() failure [%d] %s", errno, strerror(errno));
+        SetLastError(ERROR_INTERNAL_ERROR);
+        return WAIT_FAILED;
+      }
+
+		if (status != 1)
+			return WAIT_TIMEOUT;
+
+		return winpr_Handle_cleanup(Object);
+
+  }
+  #endif
+	else
+	{
+		WLog_VRB(TAG, "%s: Handle is OTHER: %d", __FUNCTION__, Type);
+		WLog_VRB(TAG, "%s: Invoking Handle_getFd", __FUNCTION__);
+		int status;
+		int fd = winpr_Handle_getFd(Object);
+		WLog_VRB(TAG, "%s: fd=%d", __FUNCTION__, fd);
 
 		if (fd < 0)
 		{
@@ -294,7 +363,9 @@ DWORD WaitForSingleObject(HANDLE hHandle, DWORD dwMilliseconds)
 			return WAIT_FAILED;
 		}
 
+		WLog_VRB(TAG, "%s: Waiting on fd=%d for %dms", __FUNCTION__, fd, dwMilliseconds);
 		status = waitOnFd(fd, Object->Mode, dwMilliseconds);
+    WLog_VRB(TAG, "waitOnFd() returned %d", status);
 
 		if (status < 0)
 		{

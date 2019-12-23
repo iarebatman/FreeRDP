@@ -54,12 +54,20 @@ struct rdpsnd_sndio_plugin
 {
 	rdpsndDevicePlugin device;
 
+  char* device_name;
   struct sio_hdl* device_handle;
   UINT32 volume;
+  size_t position;
+  size_t total_frames_written;
+  size_t total_samples_written;
 
+  size_t frame_size;
 
-	UINT32 latency;
-	AUDIO_FORMAT format;
+  bool playback_started;
+  struct sio_par device_parameters;
+
+  UINT32 latency;
+
 };
 
 #define SNDIO_LOG_ERR(_text, _error)                                         \
@@ -76,10 +84,20 @@ static void onvol_callback(void *device, UINT32 volume)
     sndio->volume = volume;
   }
 }
+static void onmove_callback(void *device, int delta)
+{
+	rdpsndSndioPlugin* sndio = (rdpsndSndioPlugin*)device;
+  if(sndio != NULL)
+  {
+    if(!sndio->playback_started)
+      sndio->playback_started = true;
+
+    sndio->position += delta;
+  }
+}
 
 static BOOL rdpsnd_sndio_format_supported(rdpsndDevicePlugin* device, const AUDIO_FORMAT* format)
 {
-  //sndiod allows us to pretty much support any format.
 	switch (format->wFormatTag)
     {
 		case WAVE_FORMAT_PCM:
@@ -107,10 +125,18 @@ static BOOL rdpsnd_sndio_set_format(rdpsndDevicePlugin* device, const AUDIO_FORM
   struct sio_par par;
   sio_initpar(&par);
   par.bits = format->wBitsPerSample;
+  par.bps = par.bits*8;
   par.rate = format->nSamplesPerSec;
   par.pchan = format->nChannels;
+  //round expects an optimal Frame count.
+  //par.round = format->nBlockAlign * par.bps * par.pchan;
+  par.round = format->nBlockAlign;
 
   sio_setpar(sndio->device_handle, &par);
+  sio_getpar(sndio->device_handle, &sndio->device_parameters);
+
+  sndio->frame_size = sndio->device_parameters.bps * sndio->device_parameters.pchan;
+  sndio->latency = latency;
 
 	return TRUE;
 }
@@ -124,14 +150,16 @@ static BOOL rdpsnd_sndio_open(rdpsndDevicePlugin* device, const AUDIO_FORMAT* fo
 
 	WLog_INFO(TAG, "open");
 
-  sndio->device_handle = sio_open(SIO_DEVANY, SIO_PLAY, 0);
+  //sndio->device_handle = sio_open(SIO_DEVANY, SIO_PLAY, 0);
+  sndio->device_handle = sio_open(sndio->device_name, SIO_PLAY, 0);
   if(sndio->device_handle == NULL)
   {
 		SNDIO_LOG_ERR("sound dev open failed", errno);
     return FALSE;
   }
 	rdpsnd_sndio_set_format(device, format, latency);
-  //sio_onvol(sndio->device_handle, onvol_callback, (void*)device);
+  sio_onvol(sndio->device_handle, onvol_callback, (void*)device);
+  sio_onmove(sndio->device_handle, onmove_callback, (void*)device);
   sio_start(sndio->device_handle);
 	return TRUE;
 }
@@ -140,13 +168,14 @@ static void rdpsnd_sndio_close(rdpsndDevicePlugin* device)
 {
 	rdpsndSndioPlugin* sndio = (rdpsndSndioPlugin*)device;
 
-	if (device == NULL)
+	if (device == NULL || sndio == NULL)
 		return;
 
 	if (sndio->device_handle != NULL)
 	{
-		WLog_INFO(TAG, "close: dsp");
+		WLog_INFO(TAG, "sio_stop");
 		sio_stop(sndio->device_handle);
+    sndio->position = 0;
 	}
 }
 
@@ -188,27 +217,75 @@ static UINT rdpsnd_sndio_play(rdpsndDevicePlugin* device, const BYTE* data, size
 	if (device == NULL || sndio->device_handle == NULL)
 		return 0;
 
+  size_t original_size = size;
 	while (size > 0)
 	{
-		size_t status = sio_write(sndio->device_handle, data, size);
+		size_t written = sio_write(sndio->device_handle, data, size);
 
-		if (status < 0)
+		if (written < 0)
 		{
 			SNDIO_LOG_ERR("write fail", errno);
-			rdpsnd_sndio_close(device);
-			rdpsnd_sndio_open(device, NULL, sndio->latency);
 			break;
 		}
-
-		data += status;
-
-		if ((size_t)status <= size)
-			size -= (size_t)status;
-		else
-			size = 0;
+    data += written;
+    if(written <= size)
+      size -= written;
+    else
+      size = 0;
 	}
+  size_t frames_written;
+  frames_written = (original_size / sndio->frame_size);
+  sndio->total_frames_written += frames_written;
 
-	return 10; /* TODO: Get real latency in [ms] */
+  size_t frame_latency;
+  frame_latency = sndio->total_frames_written - sndio->position;
+  size_t ms_latency = (frame_latency / sndio->device_parameters.rate) / (size_t)1000;
+  size_t ms_total_latency = sndio->latency + ms_latency;
+  WLog_DBG(TAG, "%s: Latency Calculation: frames_written=%d, total_frames_written=%d, position=%d, frame_latency=%d, ms_latency=%d, ms_total_latency=%d", __FUNCTION__, frames_written, sndio->total_frames_written, sndio->position, frame_latency, ms_latency, ms_total_latency);
+
+  if(sndio->playback_started)
+    return ms_total_latency;
+  else
+    return (sndio->device_parameters.bufsz / sndio->device_parameters.rate) / (size_t)1000;
+
+}
+static int rdpsnd_sndio_parse_addin_args(rdpsndDevicePlugin* device, ADDIN_ARGV* args)
+{
+	int status;
+	char *str_num, *eptr;
+	DWORD flags;
+	COMMAND_LINE_ARGUMENT_A* arg;
+	rdpsndSndioPlugin* sndio = (rdpsndSndioPlugin*)device;
+	COMMAND_LINE_ARGUMENT_A rdpsnd_sndio_args[] = { { "dev", COMMAND_LINE_VALUE_REQUIRED, "<device>",
+		                                            NULL, NULL, -1, NULL, "device" },
+		                                          { NULL, 0, NULL, NULL, NULL, -1, NULL, NULL } };
+	flags =
+	    COMMAND_LINE_SIGIL_NONE | COMMAND_LINE_SEPARATOR_COLON | COMMAND_LINE_IGN_UNKNOWN_KEYWORD;
+	status =
+	    CommandLineParseArgumentsA(args->argc, args->argv, rdpsnd_sndio_args, flags, sndio, NULL, NULL);
+
+	if (status < 0)
+		return status;
+
+	arg = rdpsnd_sndio_args;
+	errno = 0;
+
+	do
+	{
+		if (!(arg->Flags & COMMAND_LINE_VALUE_PRESENT))
+			continue;
+
+		CommandLineSwitchStart(arg) CommandLineSwitchCase(arg, "dev")
+		{
+			sndio->device_name = _strdup(arg->Value);
+
+			if (!sndio->device_name)
+				return CHANNEL_RC_NO_MEMORY;
+		}
+		CommandLineSwitchEnd(arg)
+	} while ((arg = CommandLineFindNextArgumentA(arg)) != NULL);
+
+	return CHANNEL_RC_OK;
 }
 
 

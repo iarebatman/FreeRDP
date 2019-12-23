@@ -33,4 +33,4 @@ set(${MODULE_PREFIX}_LIBS ${${MODULE_PREFIX}_LIBS} ${SNDIO_LIBRARIES})
 
 target_link_libraries(${MODULE_NAME} ${${MODULE_PREFIX}_LIBS})
 
-set_property(TARGET ${MODULE_NAME} PROPERTY FOLDER "Channels/${CHANNEL_NAME}/Client/OSS")
+set_property(TARGET ${MODULE_NAME} PROPERTY FOLDER "Channels/${CHANNEL_NAME}/Client/Sndio")

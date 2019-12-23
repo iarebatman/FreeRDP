@@ -75,14 +75,17 @@ int TestSynchWaitableTimerAPC(int argc, char* argv[])
 	 *WinPR's timer implementations.
 	 **/
 
+  printf("Waiting for completion event\n");
 	for (;;)
 	{
+    printf("BEFORE\n");
 		DWORD rc;
 #ifdef _WIN32
 		rc = WaitForSingleObjectEx(g_Event, INFINITE, TRUE);
 #else
 		rc = WaitForSingleObject(g_Event, INFINITE);
 #endif
+    printf("AFTER\n");
 
 		if (rc == WAIT_OBJECT_0)
 			break;

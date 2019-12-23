@@ -80,6 +80,11 @@ static DWORD TimerCleanupHandle(HANDLE handle)
 	if (timer->bManualReset)
 		return WAIT_OBJECT_0;
 
+  WLog_VRB(TAG, "%s: Before Read, fd=%d, WAIT_TIMEOUT=%d, WAIT_FAILED=%d, WAIT_OBJECT_0=%d", __FUNCTION__, timer->fd, WAIT_TIMEOUT, WAIT_FAILED, WAIT_OBJECT_0);
+  #ifdef WITH_KQUEUE
+  return WAIT_OBJECT_0;
+  #endif
+
 	length = read(timer->fd, (void*)&expirations, sizeof(UINT64));
 
 	if (length != 8)
@@ -96,11 +101,11 @@ static DWORD TimerCleanupHandle(HANDLE handle)
 					break;
 			}
 
-			WLog_ERR(TAG, "timer read() failure [%d] %s", errno, strerror(errno));
+			WLog_ERR(TAG, "%s: timer read() failure [%d] %s", __FUNCTION__, errno, strerror(errno));
 		}
 		else
 		{
-			WLog_ERR(TAG, "timer read() failure - incorrect number of bytes read");
+			WLog_ERR(TAG, "%s: timer read() failure - incorrect number of bytes read", __FUNCTION__);
 		}
 
 		return WAIT_FAILED;
@@ -131,12 +136,9 @@ BOOL TimerCloseHandle(HANDLE handle)
 #ifdef WITH_POSIX_TIMER
 		timer_delete(timer->tid);
 #elif defined(WITH_KQUEUE)
-    if(timer->fd != -1)
-    {
-      close(timer->fd);
-    }
-    /* EV_SET(&timer->event, 1, EVFILT_TIMER, EV_DELETE, 0, 0, NULL); */
-    /* kevent(timer->fd, NULL, 0, &timer->event, 1, NULL); */
+    WLog_VRB(TAG, "%s: Deleting timeout for timer %s", __FUNCTION__, timer->name);
+    EV_SET(&timer->event, 1, EVFILT_TIMER, EV_DELETE, 0, 0, NULL);
+    kevent(timer->fd, &timer->event, 1, NULL, 0, NULL);
 #endif
 	}
 
@@ -166,9 +168,11 @@ static void WaitableTimerHandler(void* arg)
 
 	if (!timer)
 		return;
+  WLog_VRB(TAG, "%s: Handler Start for %s", __FUNCTION__, timer->name);
 
 	if (timer->pfnCompletionRoutine)
 	{
+    WLog_VRB(TAG, "%s: Calling CompletionRoutine for %s", __FUNCTION__, timer->name);
 		timer->pfnCompletionRoutine(timer->lpArgToCompletionRoutine, 0, 0);
 
 		if (timer->lPeriod)
@@ -182,9 +186,12 @@ static void WaitableTimerHandler(void* arg)
 			{
 				WLog_ERR(TAG, "timer_settime");
 			}
-#elif defined(WITH_KQUEUE)
-      EV_SET(&timer->event, 1, EVFILT_TIMER, EV_ADD | EV_ONESHOT, 0, timer->lPeriod, timer);
-      kevent(timer->fd, NULL, 0, &timer->event, 1, NULL);
+#endif
+#if defined(WITH_KQUEUE)
+      uint64_t timeout_msec = (timer->timeout.it_value.tv_sec * 1000LL) + (timer->timeout.it_value.tv_nsec /1000000LL );
+      WLog_VRB(TAG, "%s: Timer triggered, rescheduling timer %s to %lu ms", __FUNCTION__, timer->name, timeout_msec);
+      EV_SET(&timer->event, 1, EVFILT_TIMER, EV_ADD | EV_ONESHOT, 0, timeout_msec, timer);
+      kevent(timer->fd, &timer->event, 1, NULL, 0, NULL);
 #endif
 		}
 	}
@@ -257,6 +264,14 @@ static int InitializeWaitableTimer(WINPR_TIMER* timer)
 
 #elif defined(__APPLE__)
 #elif defined(WITH_KQUEUE)
+    WLog_VRB(TAG, "%s: kqueue creation for timer %s", __FUNCTION__, timer->name);
+    timer->fd = kqueue();
+    if(timer->fd == -1)
+      {
+        WLog_ERR(TAG, "kqueue() returned error: %d", timer->fd);
+        free(timer);
+        return -1;
+      }
 #else
 		WLog_ERR(TAG, "%s: os specific implementation is missing", __FUNCTION__);
 		result = -1;
@@ -277,9 +292,9 @@ static int InitializeWaitableTimer(WINPR_TIMER* timer)
 			return -1;
 		}
 #elif defined(WITH_KQUEUE)
-    EV_SET(&timer->event, 1, EVFILT_TIMER, EV_ADD | EV_ONESHOT, 0, timer->lPeriod, timer);
-    kevent(timer->fd, NULL, 0, &timer->event, 1, NULL);
-
+    /*QUESTION: Spawn thread here to monitor kqueue and issue callbacks for APC?*/
+    /*          Right now it is only polled when WaitForSingleObject is called  */
+    /*          xfreerdp runs fine without this, but the APC tests fail         */
 #elif defined(__APPLE__)
 #else
 		WLog_ERR(TAG, "%s: os specific implementation is missing", __FUNCTION__);
@@ -305,6 +320,24 @@ static HANDLE_OPS ops = { TimerIsHandled, TimerCloseHandle,
 /**
  * Waitable Timer
  */
+static void* kqueue_monitoring_thread_start(void* arg)
+{
+	WINPR_TIMER *timer = (WINPR_TIMER*)arg;
+  if(timer == NULL)
+  {
+		WLog_ERR(TAG, "%s invalid timer", __FUNCTION__);
+    return NULL;
+  }
+  WLog_VRB(TAG, "%s: monitor thread started timer %s", __FUNCTION__, timer->name);
+  struct kevent ev;
+  while(true)
+  {
+    kevent(timer->fd, NULL, 0, &ev, 1, NULL);
+    WLog_VRB(TAG, "%s: detected event for %s", __FUNCTION__, timer->name);
+    WaitableTimerHandler(timer);
+    WLog_VRB(TAG, "%s: Handler called for %s", __FUNCTION__, timer->name);
+  }
+}
 
 HANDLE CreateWaitableTimerA(LPSECURITY_ATTRIBUTES lpTimerAttributes, BOOL bManualReset,
                             LPCSTR lpTimerName)
@@ -333,14 +366,6 @@ HANDLE CreateWaitableTimerA(LPSECURITY_ATTRIBUTES lpTimerAttributes, BOOL bManua
 			timer->name = strdup(lpTimerName);
 
 		timer->ops = &ops;
-#ifdef WITH_KQUEUE
-    timer->fd = kqueue();
-    if(timer->fd < 0)
-    {
-      WLog_ERR(TAG, "kqueue() returned error: %d", timer->fd);
-      return NULL;
-    }
-#endif
 #if defined(__APPLE__)
 
 		if (pipe(timer->pipe) != 0)
@@ -458,8 +483,10 @@ BOOL SetWaitableTimer(HANDLE hTimer, const LARGE_INTEGER* lpDueTime, LONG lPerio
 
 	if (!timer->bInit)
 	{
+    WLog_VRB(TAG, "%s: Initializing timer %s", __FUNCTION__, timer->name);
 		if (InitializeWaitableTimer(timer) < 0)
 			return FALSE;
+    WLog_VRB(TAG, "%s: Initialization complete for timer %s", __FUNCTION__, timer->name);
 	}
 
 #if defined(WITH_POSIX_TIMER) || defined(WITH_KQUEUE)
@@ -498,9 +525,11 @@ BOOL SetWaitableTimer(HANDLE hTimer, const LARGE_INTEGER* lpDueTime, LONG lPerio
 		timer->timeout.it_value.tv_sec = timer->timeout.it_interval.tv_sec;   /* seconds */
 		timer->timeout.it_value.tv_nsec = timer->timeout.it_interval.tv_nsec; /* nanoseconds */
 	}
+#endif
 
 	if (!timer->pfnCompletionRoutine)
 	{
+    WLog_VRB(TAG, "%s: Completion Routine IS NOT Set for timer %s", __FUNCTION__, timer->name);
 #ifdef HAVE_SYS_TIMERFD_H
 		status = timerfd_settime(timer->fd, 0, &(timer->timeout), NULL);
 
@@ -511,22 +540,32 @@ BOOL SetWaitableTimer(HANDLE hTimer, const LARGE_INTEGER* lpDueTime, LONG lPerio
 		}
 
 #endif
+#if defined(WITH_KQUEUE)
+    uint64_t timeout_msec = (timer->timeout.it_value.tv_sec * 1000LL) + (timer->timeout.it_value.tv_nsec /1000000LL );
+    WLog_VRB(TAG, "%s: Updating timeout for timer %s to %lu ms", __FUNCTION__, timer->name, timeout_msec);
+    EV_SET(&timer->event, 1, EVFILT_TIMER, EV_ADD | EV_ONESHOT , 0, timeout_msec, timer);
+    kevent(timer->fd, &timer->event, 1, NULL, 0, NULL);
+#endif
 	}
 	else
 	{
+    WLog_VRB(TAG, "%s: Completion Routine IS Set for timer %s", __FUNCTION__, timer->name);
 #ifdef WITH_POSIX_TIMER
 		if ((timer_settime(timer->tid, 0, &(timer->timeout), NULL)) != 0)
 		{
 			WLog_ERR(TAG, "timer_settime");
 			return FALSE;
 		}
-#elif defined(WITH_KQUEUE)
-    EV_SET(&timer->event, 1, EVFILT_TIMER, EV_ADD | EV_ONESHOT, 0, timer->lPeriod, timer);
-    kevent(timer->fd, NULL, 0, &timer->event, 1, NULL);
+#endif
+#if defined(WITH_KQUEUE)
+    uint64_t timeout_msec = (timer->timeout.it_value.tv_sec * 1000LL) + (timer->timeout.it_value.tv_nsec /1000000LL );
+    WLog_VRB(TAG, "%s: Updating timeout for timer %s to %lu ms", __FUNCTION__, timer->name, timeout_msec);
+    EV_SET(&timer->event, 1, EVFILT_TIMER, EV_ADD | EV_ONESHOT , 0, timeout_msec, timer);
+    kevent(timer->fd, &timer->event, 1, NULL, 0, NULL);
 #endif
 	}
 
-#elif defined(__APPLE__)
+#if defined(__APPLE__)
 
 	if (lpDueTime->QuadPart < 0)
 	{
@@ -601,7 +640,7 @@ BOOL CancelWaitableTimer(HANDLE hTimer)
 	WINPR_TIMER* timer;
 
 	if (!winpr_Handle_GetInfo(hTimer, &Type, &Object))
-		return FALSE;
+	return FALSE;
 
 	if (Type != HANDLE_TYPE_TIMER)
 		return FALSE;

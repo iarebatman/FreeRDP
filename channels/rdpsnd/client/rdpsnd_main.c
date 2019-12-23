@@ -833,7 +833,7 @@ static UINT rdpsnd_process_connect(rdpsndPlugin* rdpsnd)
 		{ "winmm", "" },
 #endif
 #if defined(WITH_SNDIO)
-		{ "sndio", "" },
+		{ "sndio", "default" },
 #endif
 		{ "fake", "" }
 	};
